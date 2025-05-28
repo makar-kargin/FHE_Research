@@ -6,6 +6,7 @@ import (
 
 	"github.com/tuneinsight/lattigo/v4/bfv"
 	"github.com/tuneinsight/lattigo/v4/rlwe"
+	"gonum.org/v1/gonum/stat"
 )
 
 // Функция измерения времени выполнения, возвращающая время в секундах
@@ -15,13 +16,23 @@ func measureTime(f func()) float64 {
 	return time.Since(start).Seconds()
 }
 
-func main() {
-	fmt.Println("Lattigo BFV Performance Test\n------------------")
+type PerfTestResult struct {
+	SetupTime   float64
+	KeyGenTime  float64
+	EncodeTime  float64
+	EncryptTime float64
+	AddTime     float64
+	MultTime    float64
+	DecryptTime float64
+}
+
+func perf_test() PerfTestResult {
+	res := PerfTestResult{}
 
 	// Установка параметров с корректной обработкой ошибок
 	var params bfv.Parameters
 	var err error
-	setupTime := measureTime(func() {
+	res.SetupTime = measureTime(func() {
 		params, err = bfv.NewParametersFromLiteral(bfv.ParametersLiteral{
 			LogN: 13, // N = 8192
 			LogQ: []int{55, 55},
@@ -32,7 +43,6 @@ func main() {
 			panic(fmt.Sprintf("error setting parameters: %v", err))
 		}
 	})
-	fmt.Printf("Parameter setup: %.6f s\n", setupTime)
 
 	// Генерация ключей
 	var kgen rlwe.KeyGenerator
@@ -40,13 +50,12 @@ func main() {
 	var pk *rlwe.PublicKey
 	var rlk *rlwe.RelinearizationKey
 
-	keyGenTime := measureTime(func() {
+	res.KeyGenTime = measureTime(func() {
 		kgen = rlwe.NewKeyGenerator(params.Parameters)
 		sk = kgen.GenSecretKey()
 		pk = kgen.GenPublicKey(sk)
 		rlk = kgen.GenRelinearizationKey(sk, 1)
 	})
-	fmt.Printf("Key generation: %.6f s\n", keyGenTime)
 
 	// Создание объектов для операций
 	encryptor := rlwe.NewEncryptor(params.Parameters, pk)
@@ -66,50 +75,80 @@ func main() {
 	polyPlain1 := bfv.NewPlaintext(params, 0)
 	polyPlain2 := bfv.NewPlaintext(params, 0)
 
-	encodeTime := measureTime(func() {
+	res.EncodeTime = measureTime(func() {
 		encoder.Encode(plaintext1, polyPlain1)
 		encoder.Encode(plaintext2, polyPlain2)
 	})
-	fmt.Printf("Encoding (2 vectors): %.6f s\n", encodeTime)
 
 	// Шифрование
 	cipher1 := rlwe.NewCiphertext(params.Parameters, 1, 0)
 	cipher2 := rlwe.NewCiphertext(params.Parameters, 1, 0)
 
-	encryptTime := measureTime(func() {
+	res.EncryptTime = measureTime(func() {
 		encryptor.Encrypt(polyPlain1, cipher1)
 		encryptor.Encrypt(polyPlain2, cipher2)
 	})
-	fmt.Printf("Encryption (2 vectors): %.6f s\n", encryptTime)
 
 	// Гомоморфное сложение
 	cipherAdd := rlwe.NewCiphertext(params.Parameters, 1, 0)
 
-	addTime := measureTime(func() {
+	res.AddTime = measureTime(func() {
 		evaluator.Add(cipher1, cipher2, cipherAdd)
 	})
-	fmt.Printf("Homomorphic addition: %.6f s\n", addTime)
 
 	// Гомоморфное умножение
 	cipherMult := rlwe.NewCiphertext(params.Parameters, 2, 0)
 
-	multTime := measureTime(func() {
+	res.MultTime = measureTime(func() {
 		evaluator.Mul(cipher1, cipher2, cipherMult)
 		cipherRelinMult := rlwe.NewCiphertext(params.Parameters, 1, 0)
 		evaluator.Relinearize(cipherMult, cipherRelinMult)
 	})
-	fmt.Printf("Homomorphic multiplication: %.6f s\n", multTime)
 
 	// Расшифрование
 	decryptedPlain := bfv.NewPlaintext(params, 0)
 
-	decryptTime := measureTime(func() {
+	res.DecryptTime = measureTime(func() {
 		decryptor.Decrypt(cipherAdd, decryptedPlain)
 	})
-	fmt.Printf("Decryption: %.6f s\n", decryptTime)
 
 	// Декодирование и проверка результата
 	result := make([]uint64, params.N())
 	encoder.Decode(decryptedPlain, result)
-	fmt.Printf("Decoded result (first 5 values): %v\n", result[:5])
+
+	return res
+}
+
+func main() {
+	fmt.Println("Lattigo BFV Performance Test\n------------------")
+
+	n := 100
+	fmt.Printf("Performing %v iterations...\n", n)
+
+	var setupTime []float64
+	var keyGenTime []float64
+	var encodeTime []float64
+	var encryptTime []float64
+	var addTime []float64
+	var multTime []float64
+	var decryptTime []float64
+
+	for i := 0; i < n; i++ {
+		times := perf_test()
+		setupTime = append(setupTime, times.SetupTime)
+		keyGenTime = append(keyGenTime, times.KeyGenTime)
+		encodeTime = append(encodeTime, times.EncodeTime)
+		encryptTime = append(encryptTime, times.EncryptTime)
+		addTime = append(addTime, times.AddTime)
+		multTime = append(multTime, times.MultTime)
+		decryptTime = append(decryptTime, times.DecryptTime)
+	}
+
+	fmt.Printf("Average parameter setup time: %.6f±%f s\n", stat.Mean(setupTime, nil), stat.StdDev(setupTime, nil))
+	fmt.Printf("Average key generation time: %.6f±%f s\n", stat.Mean(keyGenTime, nil), stat.StdDev(keyGenTime, nil))
+	fmt.Printf("Average encoding time: %.6f±%f s\n", stat.Mean(encodeTime, nil), stat.StdDev(encodeTime, nil))
+	fmt.Printf("Average encryption time: %.6f±%f s\n", stat.Mean(encryptTime, nil), stat.StdDev(encryptTime, nil))
+	fmt.Printf("Average addition time: %.6f±%f s\n", stat.Mean(addTime, nil), stat.StdDev(addTime, nil))
+	fmt.Printf("Average multiplication time: %.6f±%f s\n", stat.Mean(multTime, nil), stat.StdDev(multTime, nil))
+	fmt.Printf("Average decryption time: %.6f±%f s\n", stat.Mean(decryptTime, nil), stat.StdDev(decryptTime, nil))
 }
