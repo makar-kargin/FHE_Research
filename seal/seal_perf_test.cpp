@@ -2,10 +2,38 @@
 #include <chrono>
 #include <iostream>
 #include <vector>
+#include <cmath>
+#include <numeric>
+#include <iomanip>
 
-// Функция для замера времени
+// Структура для хранения статистики
+struct TimingStats {
+    double mean;
+    double stddev;
+    
+    // Вычисление среднего и стандартного отклонения
+    static TimingStats calculate(const std::vector<double>& timings) {
+        double sum = std::accumulate(timings.begin(), timings.end(), 0.0);
+        double mean = sum / timings.size();
+        
+        double sq_sum = std::inner_product(timings.begin(), timings.end(), 
+                                          timings.begin(), 0.0);
+        double stddev = std::sqrt(sq_sum / timings.size() - mean * mean);
+        
+        return {mean, stddev};
+    }
+};
+
+// Функция для форматированного вывода результатов
+void printStats(const std::string& operation, const TimingStats& stats) {
+    std::cout << "Average " << operation << ": " 
+              << std::fixed << std::setprecision(6) << stats.mean 
+              << "±" << std::setprecision(6) << stats.stddev << " s" << std::endl;
+}
+
+// Функция для замера времени одной операции
 template<typename Func>
-double measureTime(Func f) {
+double measureSingleTime(Func f) {
     auto start = std::chrono::high_resolution_clock::now();
     f();
     auto end = std::chrono::high_resolution_clock::now();
@@ -15,101 +43,102 @@ double measureTime(Func f) {
 int main() {
     std::cout << "Microsoft SEAL BFV Performance Test\n------------------\n";
     
-    // Настройка параметров
+    // Количество итераций
+    const int iterations = 100;
+    std::cout << "Performing " << iterations << " iterations..." << std::endl;
+    
+    // Векторы для хранения результатов
+    std::vector<double> contextTimes(iterations);
+    std::vector<double> keyGenTimes(iterations);
+    std::vector<double> encTimes(iterations);
+    std::vector<double> addTimes(iterations);
+    std::vector<double> multTimes(iterations);
+    std::vector<double> decTimes(iterations);
+    
+    // Предварительная настройка параметров (один раз)
     seal::EncryptionParameters parms(seal::scheme_type::bfv);
     size_t poly_modulus_degree = 8192;
     parms.set_poly_modulus_degree(poly_modulus_degree);
     parms.set_coeff_modulus(seal::CoeffModulus::BFVDefault(poly_modulus_degree));
-    
-    // Поиск подходящего простого числа для батчинга
-    // Оно должно быть простым и ≡ 1 (mod 2*poly_modulus_degree)
     parms.set_plain_modulus(seal::PlainModulus::Batching(poly_modulus_degree, 20));
     
-    // Создание контекста
-    double contextTime = measureTime([&]() {
+    // Запуск итераций
+    for (int i = 0; i < iterations; i++) {
+        // Создание контекста
+        contextTimes[i] = measureSingleTime([&]() {
+            seal::SEALContext context(parms);
+        });
+        
         seal::SEALContext context(parms);
-    });
-    std::cout << "Context creation: " << contextTime << " s\n";
-    
-    seal::SEALContext context(parms);
-    
-    // Вывод выбранного модуля
-    // std::cout << "Using plaintext modulus: " << parms.plain_modulus().value() << std::endl;
-    
-    // Генерация ключей
-    double keyGenTime = measureTime([&]() {
+        
+        // Генерация ключей
+        keyGenTimes[i] = measureSingleTime([&]() {
+            seal::KeyGenerator keygen(context);
+            auto secret_key = keygen.secret_key();
+            seal::PublicKey public_key;
+            keygen.create_public_key(public_key);
+            seal::RelinKeys relin_keys;
+            keygen.create_relin_keys(relin_keys);
+        });
+        
+        // Создание ключей для тестирования
         seal::KeyGenerator keygen(context);
         auto secret_key = keygen.secret_key();
         seal::PublicKey public_key;
         keygen.create_public_key(public_key);
         seal::RelinKeys relin_keys;
         keygen.create_relin_keys(relin_keys);
-    });
-    std::cout << "Key generation: " << keyGenTime << " s\n";
-    
-    // Создание ключей для тестирования
-    seal::KeyGenerator keygen(context);
-    auto secret_key = keygen.secret_key();
-    seal::PublicKey public_key;
-    keygen.create_public_key(public_key);
-    seal::RelinKeys relin_keys;
-    keygen.create_relin_keys(relin_keys);
-    
-    // Инициализация объектов для операций
-    seal::Encryptor encryptor(context, public_key);
-    seal::Evaluator evaluator(context);
-    seal::Decryptor decryptor(context, secret_key);
-    seal::BatchEncoder encoder(context);
-    
-    // Подготовка данных
-    size_t slot_count = encoder.slot_count();
-    std::cout << "Number of slots: " << slot_count << std::endl;
-    
-    std::vector<uint64_t> pod_vector1(slot_count, 1);
-    std::vector<uint64_t> pod_vector2(slot_count, 2);
-    
-    seal::Plaintext plain1, plain2;
-    encoder.encode(pod_vector1, plain1);
-    encoder.encode(pod_vector2, plain2);
-    
-    // Шифрование
-    seal::Ciphertext cipher1, cipher2;
-    double encTime = measureTime([&]() {
-        encryptor.encrypt(plain1, cipher1);
-        encryptor.encrypt(plain2, cipher2);
-    });
-    std::cout << "Encryption (2 vectors): " << encTime << " s\n";
-    
-    // Гомоморфное сложение
-    seal::Ciphertext cipher_add;
-    double addTime = measureTime([&]() {
-        evaluator.add(cipher1, cipher2, cipher_add);
-    });
-    std::cout << "Homomorphic addition: " << addTime << " s\n";
-    
-    // Гомоморфное умножение
-    seal::Ciphertext cipher_mult;
-    double multTime = measureTime([&]() {
-        evaluator.multiply(cipher1, cipher2, cipher_mult);
-        evaluator.relinearize_inplace(cipher_mult, relin_keys);
-    });
-    std::cout << "Homomorphic multiplication: " << multTime << " s\n";
-    
-    // Расшифрование
-    seal::Plaintext decrypted_result;
-    double decTime = measureTime([&]() {
-        decryptor.decrypt(cipher_add, decrypted_result);
-    });
-    std::cout << "Decryption: " << decTime << " s\n";
-    
-    // Проверка результата
-    std::vector<uint64_t> result;
-    encoder.decode(decrypted_result, result);
-    std::cout << "Decrypted result (first 5 values): ";
-    for (int i = 0; i < 5 && i < result.size(); i++) {
-        std::cout << result[i] << " ";
+        
+        // Инициализация объектов для операций
+        seal::Encryptor encryptor(context, public_key);
+        seal::Evaluator evaluator(context);
+        seal::Decryptor decryptor(context, secret_key);
+        seal::BatchEncoder encoder(context);
+        
+        // Подготовка данных
+        size_t slot_count = encoder.slot_count();
+        std::vector<uint64_t> pod_vector1(slot_count, 1);
+        std::vector<uint64_t> pod_vector2(slot_count, 2);
+        
+        seal::Plaintext plain1, plain2;
+        encoder.encode(pod_vector1, plain1);
+        encoder.encode(pod_vector2, plain2);
+        
+        // Шифрование
+        seal::Ciphertext cipher1, cipher2;
+        encTimes[i] = measureSingleTime([&]() {
+            encryptor.encrypt(plain1, cipher1);
+            encryptor.encrypt(plain2, cipher2);
+        });
+        
+        // Гомоморфное сложение
+        seal::Ciphertext cipher_add;
+        addTimes[i] = measureSingleTime([&]() {
+            evaluator.add(cipher1, cipher2, cipher_add);
+        });
+        
+        // Гомоморфное умножение
+        seal::Ciphertext cipher_mult;
+        multTimes[i] = measureSingleTime([&]() {
+            evaluator.multiply(cipher1, cipher2, cipher_mult);
+            evaluator.relinearize_inplace(cipher_mult, relin_keys);
+        });
+        
+        // Расшифрование
+        seal::Plaintext decrypted_result;
+        decTimes[i] = measureSingleTime([&]() {
+            decryptor.decrypt(cipher_add, decrypted_result);
+        });
     }
+    
+    // Вычисление и вывод статистики
     std::cout << std::endl;
+    printStats("context creation time", TimingStats::calculate(contextTimes));
+    printStats("key generation time", TimingStats::calculate(keyGenTimes));
+    printStats("encryption time", TimingStats::calculate(encTimes));
+    printStats("addition time", TimingStats::calculate(addTimes));
+    printStats("multiplication time", TimingStats::calculate(multTimes));
+    printStats("decryption time", TimingStats::calculate(decTimes));
     
     return 0;
 }
